@@ -63,6 +63,111 @@ def landing_procedure(vehicle):
         time.sleep(1)
     print("Drone telah mendarat!")
 
+def get_distance_meters(location1, location2):
+    dlat = location2.lat - location1.lat
+    dlong = location2.lon - location1.lon
+    return np.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
+def send_ned_velocity(vehicle, velocity_x, velocity_y, velocity_z, duration):
+    msg = vehicle.message_factory.set_position_target_local_ned_encode(
+        0,       # time_boot_ms (not used)
+        0, 0,    # target system, target component
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED, # frame
+        0b0000111111000111, # type_mask (only speeds enabled)
+        0, 0, 0, # x, y, z positions (not used)
+        velocity_x, velocity_y, velocity_z, # x, y, z velocity in m/s
+        0, 0, 0, # x, y, z acceleration (not supported yet, ignored in GCS_Mavlink)
+        0, 0)    # yaw, yaw_rate (not supported yet, ignored in GCS_Mavlink) 
+    
+    for x in range(0, duration):
+        vehicle.send_mavlink(msg)
+        time.sleep(1)
+
+def goto_position(vehicle, lat, lon, alt):
+    location = LocationGlobalRelative(lat, lon, alt)
+    vehicle.simple_goto(location)
+    
+    while True:
+        current_location = vehicle.location.global_relative_frame
+        remaining_distance = get_distance_meters(current_location, location)
+        if remaining_distance <= 1.0:  # 1 meter threshold
+            break
+        time.sleep(1)
+def draw_keypoints(image, keypoints, line_color=(0,0,255)):
+    return cv2.drawKeypoints(image, keypoints, np.array([]), line_color, 
+                           cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+def get_position_difference(keyPoint, target_x, target_y):
+    blob_x = int(keyPoint.pt[0])
+    blob_y = int(keyPoint.pt[1])
+    return blob_x - target_x, blob_y - target_y
+
+def apply_search_window(image, window_adim=[0.0, 0.0, 1.0, 1.0]):
+    rows = image.shape[0]
+    cols = image.shape[1]
+    x_min_px = int(cols * window_adim[0])
+    y_min_px = int(rows * window_adim[1])
+    x_max_px = int(cols * window_adim[2])
+    y_max_px = int(rows * window_adim[3])    
+    
+    mask = np.zeros(image.shape, np.uint8)
+    mask[y_min_px:y_max_px, x_min_px:x_max_px] = image[y_min_px:y_max_px, x_min_px:x_max_px]   
+    return mask
+
+def blob_detect(image, hsv_min, hsv_max, blur=0, blob_params=None, search_window=None):
+    if blur > 0: 
+        image = cv2.blur(image, (blur, blur))
+        
+    if search_window is None: 
+        search_window = [0.0, 0.0, 1.0, 1.0]
+    
+    # Convert to HSV and apply threshold
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, hsv_min, hsv_max)
+    
+    # Morphological operations
+    mask = cv2.dilate(mask, None, iterations=2)
+    mask = cv2.erode(mask, None, iterations=2)
+    
+    # Apply search window
+    mask = apply_search_window(mask, search_window)
+    
+    # Create blob detector
+    if blob_params is None:
+        params = cv2.SimpleBlobDetector_Params()
+        params.minThreshold = 0
+        params.maxThreshold = 100
+        params.filterByArea = True
+        params.minArea = 30
+        params.maxArea = 20000
+        params.filterByCircularity = True
+        params.minCircularity = 0.1
+        params.filterByConvexity = True
+        params.minConvexity = 0.5
+        params.filterByInertia = True
+        params.minInertiaRatio = 0.5
+    else:
+        params = blob_params     
+
+    detector = cv2.SimpleBlobDetector_create(params)
+    reversemask = 255 - mask
+    keypoints = detector.detect(reversemask)
+    
+    return keypoints, mask
+
+def draw_target(image, target_x=0.5, target_y=0.5, size=0.1, line=2):
+    rows = image.shape[0]
+    cols = image.shape[1]
+    
+    center_x = int(cols * target_x)
+    center_y = int(rows * target_y)
+    line_length = int(min(rows, cols) * size)
+    
+    cv2.line(image, (center_x - line_length, center_y), (center_x + line_length, center_y), (0, 255, 255), line)
+    cv2.line(image, (center_x, center_y - line_length), (center_x, center_y + line_length), (0, 255, 255), line)
+    cv2.circle(image, (center_x, center_y), 5, (0, 0, 255), -1)
+    
+    return image, center_x, center_y
+
+
 def main():
     print("\nMenghubungkan ke drone...")
     vehicle = connect('/dev/ttyS4', wait_ready=True, baud=921600)
